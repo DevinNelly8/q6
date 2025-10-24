@@ -155,8 +155,29 @@ def check_detection_info(path: str) -> List[str]:
     return issues
 
 
-def check_directory(result_dir: str) -> int:
-    print(f"检查输出目录: {result_dir}\n{'=' * 60}")
+class Reporter:
+    """Collect human-readable messages while also streaming them to stdout."""
+
+    def __init__(self) -> None:
+        self.lines: List[str] = []
+
+    def add(self, message: str = "") -> None:
+        print(message)
+        self.lines.append(message)
+
+    def extend(self, messages: Sequence[str]) -> None:
+        for message in messages:
+            self.add(message)
+
+    def save(self, path: str) -> None:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(self.lines))
+            if self.lines and not self.lines[-1].endswith("\n"):
+                handle.write("\n")
+
+
+def check_directory(result_dir: str, reporter: Reporter) -> int:
+    reporter.add(f"检查输出目录: {result_dir}\n{'=' * 60}")
 
     all_issues: List[str] = []
     exit_code = 0
@@ -172,7 +193,7 @@ def check_directory(result_dir: str) -> int:
     for name in OPTIONAL_FILES:
         path = os.path.join(result_dir, name)
         if not os.path.exists(path):
-            print(f"⚠️ 可选文件缺失: {name}")
+            reporter.add(f"⚠️ 可选文件缺失: {name}")
 
     # Analyse CSV files that are present.
     for csv_name in REQUIRED_FILES + OPTIONAL_FILES:
@@ -189,7 +210,8 @@ def check_directory(result_dir: str) -> int:
             continue
 
         total_rows = len(rows)
-        print(f"\n{csv_name}: {total_rows} 行")
+        reporter.add("")
+        reporter.add(f"{csv_name}: {total_rows} 行")
         numeric_issues = check_ranges(stats)
         missing_ratio: Dict[str, float] = {}
         for column in stats:
@@ -213,7 +235,7 @@ def check_directory(result_dir: str) -> int:
             exit_code = 1
         summary = summarize_stats(stats, total_rows)
         if summary:
-            print(summary)
+            reporter.extend(summary.splitlines())
 
     detection_path = os.path.join(result_dir, "detection_info.txt")
     all_issues.extend(check_detection_info(detection_path))
@@ -221,11 +243,13 @@ def check_directory(result_dir: str) -> int:
         exit_code = 1
 
     if all_issues:
-        print("\n发现以下问题:")
+        reporter.add("")
+        reporter.add("发现以下问题:")
         for issue in all_issues:
-            print(f" - {issue}")
+            reporter.add(f" - {issue}")
     else:
-        print("\n✓ 未发现问题")
+        reporter.add("")
+        reporter.add("✓ 未发现问题")
 
     return exit_code
 
@@ -238,6 +262,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "result_dir",
         help="分析输出目录 (包含 coordination_time_series.csv 等文件)",
     )
+    parser.add_argument(
+        "--report",
+        help="若提供则将检查结果写入指定文件",
+    )
     return parser.parse_args(argv)
 
 
@@ -246,7 +274,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not os.path.isdir(args.result_dir):
         print(f"❌ 目录不存在: {args.result_dir}")
         return 1
-    return check_directory(args.result_dir)
+    reporter = Reporter()
+    exit_code = check_directory(args.result_dir, reporter)
+    if args.report:
+        try:
+            reporter.save(args.report)
+        except OSError as exc:
+            print(f"❌ 无法写入报告 {args.report}: {exc}")
+            return 1
+    return exit_code
 
 
 if __name__ == "__main__":
