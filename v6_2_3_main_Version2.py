@@ -388,12 +388,14 @@ def main(argv=None):
         print(f"❌ ERROR: 文件不存在: {xyz_path}")
         return 1
 
-    analyze_trajectory(
+    result = analyze_trajectory(
         xyz_path,
         output_dir=args.output_dir,
         dt_ps=args.dt_ps,
         sample_interval=args.sample_interval,
     )
+    if result is None:
+        return 1
     return 0
 
 
