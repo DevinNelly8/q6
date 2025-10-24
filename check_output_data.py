@@ -41,22 +41,33 @@ class ColumnStats:
     min_value: Optional[float] = None
     max_value: Optional[float] = None
     sum_value: float = 0.0
+    is_numeric: Optional[bool] = None
 
     def register(self, raw: str) -> None:
         if raw is None or raw == "":
             self.missing += 1
             return
 
+        if self.is_numeric is None and column_likely_numeric(self.name):
+            self.is_numeric = True
+
+        if self.is_numeric is False:
+            return
+
         try:
             value = float(raw)
         except ValueError:
-            self.nan += 1
+            if self.is_numeric:
+                self.nan += 1
+            else:
+                self.is_numeric = False
             return
 
         if math.isnan(value) or math.isinf(value):
             self.nan += 1
             return
 
+        self.is_numeric = True
         self.count += 1
         self.sum_value += value
         if self.min_value is None or value < self.min_value:
@@ -91,6 +102,10 @@ COLUMN_RANGES: List[Tuple[str, float, float]] = [
 ]
 
 
+def column_likely_numeric(name: str) -> bool:
+    return any(marker in name for marker, _, _ in COLUMN_RANGES)
+
+
 def collect_csv_stats(path: str) -> Tuple[List[ColumnStats], List[Dict[str, str]]]:
     with open(path, "r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
@@ -107,7 +122,7 @@ def collect_csv_stats(path: str) -> Tuple[List[ColumnStats], List[Dict[str, str]
 def check_ranges(stats: Sequence[ColumnStats]) -> List[str]:
     issues: List[str] = []
     for column in stats:
-        if column.count == 0:
+        if column.count == 0 or column.is_numeric is not True:
             continue
         for marker, lower, upper in COLUMN_RANGES:
             if marker in column.name:
@@ -127,7 +142,8 @@ def summarize_stats(stats: Sequence[ColumnStats], total_rows: int) -> str:
     important = [
         column
         for column in stats
-        if any(marker in column.name for marker in ("_cn_", "_q6", "_q4", "gcn"))
+        if column.is_numeric is True
+        and any(marker in column.name for marker in ("_cn_", "_q6", "_q4", "gcn"))
     ]
     lines: List[str] = []
     for column in important:
@@ -140,19 +156,19 @@ def summarize_stats(stats: Sequence[ColumnStats], total_rows: int) -> str:
     return "\n".join(lines)
 
 
-def check_detection_info(path: str) -> List[str]:
+def check_detection_info(path: str) -> Tuple[List[str], bool]:
     issues: List[str] = []
     try:
         with open(path, "r", encoding="utf-8") as handle:
             content = handle.read()
     except OSError as exc:
-        return [f"无法读取 detection_info.txt: {exc}"]
+        return [f"无法读取 detection_info.txt: {exc}"], True
 
     required_tokens = ["元素检测结果", "金属元素", "总帧数"]
     for token in required_tokens:
         if token not in content:
             issues.append(f"detection_info.txt 缺少关键字段: {token}")
-    return issues
+    return issues, bool(issues)
 
 
 class Reporter:
@@ -170,6 +186,9 @@ class Reporter:
             self.add(message)
 
     def save(self, path: str) -> None:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write("\n".join(self.lines))
             if self.lines and not self.lines[-1].endswith("\n"):
@@ -219,7 +238,7 @@ def check_directory(result_dir: str, reporter: Reporter) -> int:
                 ratio = column.missing / total_rows
                 if ratio > 0.25:
                     missing_ratio[column.name] = ratio
-            if column.nan:
+            if column.nan and column.is_numeric is not False:
                 numeric_issues.append(
                     f"列 {column.name} 包含 {column.nan} 个无法解析的数值"
                 )
@@ -238,8 +257,9 @@ def check_directory(result_dir: str, reporter: Reporter) -> int:
             reporter.extend(summary.splitlines())
 
     detection_path = os.path.join(result_dir, "detection_info.txt")
-    all_issues.extend(check_detection_info(detection_path))
-    if any(issue for issue in all_issues if "缺少关键字段" in issue):
+    detection_issues, detection_failed = check_detection_info(detection_path)
+    all_issues.extend(detection_issues)
+    if detection_failed:
         exit_code = 1
 
     if all_issues:
